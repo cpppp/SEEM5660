@@ -163,13 +163,31 @@ class AgentLoop:
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        """Format tool calls as detailed hint with reasoning."""
         def _fmt(tc):
-            val = next(iter(tc.arguments.values()), None) if tc.arguments else None
-            if not isinstance(val, str):
-                return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
-        return ", ".join(_fmt(tc) for tc in tool_calls)
+            args_str = ""
+            if tc.arguments:
+                parts = []
+                for k, v in tc.arguments.items():
+                    if isinstance(v, str):
+                        val = f'"{v[:50]}…"' if len(v) > 50 else f'"{v}"'
+                    elif isinstance(v, (dict, list)):
+                        val = "…" if len(str(v)) > 30 else str(v)
+                    else:
+                        val = str(v)
+                    parts.append(f"{k}={val}")
+                args_str = ", ".join(parts)
+            return f"🔧 **{tc.name}**({args_str})"
+        return "\n".join(_fmt(tc) for tc in tool_calls)
+
+    @staticmethod
+    def _tool_result_summary(tool_name: str, result: str, max_len: int = 200) -> str:
+        """Format tool result as a concise summary for user visibility."""
+        if not result:
+            return f"✅ **{tool_name}**: Completed (no output)"
+        if len(result) <= max_len:
+            return f"✅ **{tool_name}**: {result}"
+        return f"✅ **{tool_name}**: {result[:max_len]}…\n_(Result truncated, {len(result)} chars total)_"
 
     async def _run_agent_loop(
         self,
@@ -224,6 +242,8 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if on_progress:
+                        await on_progress(self._tool_result_summary(tool_call.name, result), tool_result=True)
             else:
                 final_content = self._strip_think(response.content)
                 break
@@ -392,10 +412,11 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _bus_progress(content: str, *, tool_hint: bool = False, tool_result: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
+            meta["_tool_result"] = tool_result
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
